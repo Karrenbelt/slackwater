@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+protected='refs/heads/main'
+
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+    [[ "$remote_ref" == "$protected" ]] || continue
+
+    if [[ "$local_sha" == "0000000000000000000000000000000000000000" ]]; then
+        echo "pre-push: refusing to delete $remote_ref" >&2
+    else
+        echo "pre-push: refusing direct push to $remote_ref" >&2
+    fi
+    exit 1
+done
+
+if ! command -v just > /dev/null; then
+  echo "pre-push: just is not on PATH. Is the nix shell active?" >&2
+  exit 1
+fi
+
+just prepush
