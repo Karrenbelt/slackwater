@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+
+    runs-on: ubuntu-latest
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The build uses the Nix toolchain. RUSTUP_TOOLCHAIN only stops this
+      # action's own rustc probe downloading the channel in rust-toolchain.toml.
+      - uses: Swatinem/rust-cache@v2
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        with:
+          prefix-key: v0-slackwater
+          key: ${{ hashFiles('rust-toolchain.toml') }}
+          workspaces: |
+            crates/slackwater
+            upstream/8ball030/basis_trade/executor
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Stock Foundry comes prebuilt from cache.nixos.org; only the fork tests
+      # need the Monad-enabled build, and they do not run here.
+      - name: Validate
+        run: nix-shell --arg monad false --run 'just fmt-check lint test-offline'
+
+      - name: Check nothing was rewritten
+        run: git diff --exit-code

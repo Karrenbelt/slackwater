@@ -1,0 +1,24 @@
+# Everything hidden is ignored, then re-included deliberately.
+**/.*
+
+!.cargo
+!.config
+!.envrc
+!.github
+!.gitignore
+!.gitmodules
+!**/.gitkeep
+
+# Secret-shaped files outside the hidden-file rule
+*.env
+*.key
+*.pem
+
+# Rust
+**/target/
+
+# Foundry; lib/ is reconstituted by `just deps`
+/smart_contracts/lib/
+/smart_contracts/out/
+/smart_contracts/cache/
+/smart_contracts/broadcast/

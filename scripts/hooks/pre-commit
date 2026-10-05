@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v just > /dev/null; then
+  echo "pre-commit: just is not on PATH. Is the nix shell active?" >&2
+  exit 1
+fi
+
+just precommit

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+subject=$(head -n 1 "$1")
+
+case "$subject" in
+  Merge*|Revert*|fixup!*|squash!*) exit 0 ;;
+esac
+
+types='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
+
+if ! [[ "$subject" =~ ^($types)(\([a-z0-9._-]+\))?!?:\ .+ ]]; then
+  cat >&2 <<EOF
+commit-msg: subject is not a Conventional Commit.
+
+  got       $subject
+  expected  <type>[(scope)][!]: <description>
+  types     $(echo "$types" | tr '|' ' ')
+  example   feat: add keeper dry-run mode
+EOF
+  exit 1
+fi
+
+if (( ${#subject} > 72 )); then
+  echo "commit-msg: subject is ${#subject} characters. Keep it to 72 or fewer." >&2
+  exit 1
+fi
+
+if grep -qi '^co-authored-by:' "$1"; then
+  echo "commit-msg: remove the Co-Authored-By trailer." >&2
+  exit 1
+fi
