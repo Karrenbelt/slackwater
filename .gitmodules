@@ -1,0 +1,6 @@
+[submodule "upstream/basis_trade"]
+	path = upstream/8ball030/basis_trade
+	url = https://github.com/Karrenbelt/perpl_basis_trade
+[submodule "dex-sdk"]
+	path = upstream/dex-sdk
+	url = https://github.com/PerplFoundation/dex-sdk
