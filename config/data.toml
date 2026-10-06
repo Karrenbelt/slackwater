@@ -1,0 +1,42 @@
+# Parameters for `slackwater`. Paths are relative to the repository root.
+# The Perpl exchange address comes from `perpl_sdk::Chain::mainnet()`.
+
+rpc_url = "https://rpc.monad.xyz"
+
+[paths]
+raw = "data/raw"
+derived = "data/derived"
+manifest = "data/MANIFEST.jsonl"
+
+# The public RPC allows 50 requests a second and counts each call inside a
+# JSON-RPC batch; requests are sent one call each, paced below that.
+[rpc]
+requests_per_second = 40
+in_flight = 20
+max_rate_limit_retries = 10
+initial_backoff_ms = 100
+
+[[markets]]
+perp_id = 1
+label = "BTC"
+
+[[markets]]
+perp_id = 20
+label = "ETH"
+
+[[markets]]
+perp_id = 10
+label = "MON"
+
+[hedged_exit]
+# Fee of a post-only Perpl hedge, assumed filled at the Perpl ask.
+maker_hedge_fee_bps = 0.45
+
+[fills]
+perp_id = 10
+# Above this share of unmatched fills, the ask-side figures are not interpreted.
+max_unmatched_share = 0.05
+
+[depth]
+perp_id = 10
+clip_usd = [100, 500]

@@ -6,3 +6,23 @@ rust-version = "1.98"
 publish = false
 
 [dependencies]
+alloy = { version = "2.5.0", default-features = false, features = [
+    "std",
+    "json",
+    "sol-types",
+    "contract",
+    "provider-http",
+    "reqwest",
+    "reqwest-rustls-tls",
+    "rpc-client",
+    "rpc-types",
+    "transport-throttle",
+] }
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+perpl-sdk = { path = "../../upstream/dex-sdk/crates/sdk", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+toml = "0.8.23"
