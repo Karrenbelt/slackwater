@@ -1,13 +1,13 @@
 # Hedge in place, sell atomically: flows
 
 A MON holder hedges in place through a contract they own, as a maker on Perpl, run by a keeper that cannot withdraw their funds.
-The hedge earns funding while it is held.
+While it is held, the hedge receives funding when funding is positive for shorts, as it was on 26 of 31 days to 6 October on MON, and pays it otherwise.
 When the Kuru and Perpl prices allow, the keeper closes the hedge and sells the MON in one atomic transaction, as Perpl's reference contract does.
 The hedge is not atomic: it rests on Perpl's book until takers fill it.
 The exit is atomic: both legs happen, or neither does.
 The contract is our fork of Perpl's reference `BasisTrader`, with `hedge`, `cancelHedge` and a guard on the exit added.
 
-Parties: the owner, who is the holder (deploys, funds, can force an exit, can withdraw); the keeper (posts and cancels the hedge, tops up margin, runs the gated exit, and can send funds nowhere but the venues it trades with, within the owner's floors); `BasisTrader` (holds the MON and the Perpl account); Perpl (the perpetual); Kuru (the spot book).
+Parties: the owner, who is the holder (deploys, funds, can force an exit, can withdraw); the keeper (posts and cancels the hedge, tops up margin, runs the gated exit, and can send funds nowhere but the venues it trades with; that its trades cannot hurt the holder rests on the owner's floors and a price bound on the hedge, which are being added and tested); `BasisTrader` (holds the MON and the Perpl account); Perpl (the perpetual); Kuru (the spot book).
 
 ## States
 
@@ -133,7 +133,7 @@ Here the holder already owns the spot, so there is no purchase, and the short is
 One instance per holder: the holder deploys and owns their own `BasisTrader`, and names our keeper.
 The keeper's functions trade and manage margin inside the instance; none of them can send funds anywhere but the venues it trades with, and its trades are bounded by the floors the owner sets, so the holder keeps custody. Adversarial tests of that bound are the next step.
 
-Next, a vault that owns instances, so that many holders share one Perpl account and hold a transferable share.
+Next, a vault that owns an instance, so that many holders share one instance and hold a transferable share; its simplest honest form takes deposits and withdrawals only between rounds, while no hedge is open or resting.
 Two problems stand before it:
 - Two assets come in, MON for the spot and AUSD for Perpl margin, and ERC-4626 takes one; wrapping MON helps with the first but not the second, and Kuru's MON/AUSD book was empty when we checked.
 - A maker hedge fills over minutes to hours, so a deposit that arrives while the hedge is part filled must be priced against a position that is partly unhedged, valued at the Perpl mark, without moving value between depositors.
