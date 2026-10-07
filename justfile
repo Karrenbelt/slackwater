@@ -68,6 +68,12 @@ abi-drift abi="upstream/dex-sdk/crates/sdk/abi/dex/Exchange.json":
     scripts/abi-drift.sh 0x34B6552d57a35a1D042CcAe1951BD1C370112a6F {{ abi }} \
         FundingEventCompleted MakerOrderFilledV2 OrderRequestV2 TakerOrderFilledV2 OrderBatchCompleted
 
+data-fetch *args:
+    scripts/data/fetch.sh {{ args }}
+
+data-stats:
+    scripts/data/stats.sh
+
 demo:
     ./scripts/demo.sh
 
