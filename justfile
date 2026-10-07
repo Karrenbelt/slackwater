@@ -3,7 +3,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 export MONAD_RPC_URL := env("MONAD_RPC_URL", "https://rpc.monad.xyz")
 export MONAD_TESTNET_RPC_URL := env("MONAD_TESTNET_RPC_URL", "https://testnet-rpc.monad.xyz")
 
-# Upstream is read-only to us: nothing here rewrites it.
+# Upstream is our fork of 8ball030/perpl_basis_trade; we edit it on branches
+# there, and nothing here rewrites it.
 sc := "upstream/8ball030/basis_trade/smart_contracts"
 ex := "upstream/8ball030/basis_trade/executor"
 rs := "crates/slackwater"
