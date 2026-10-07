@@ -6,6 +6,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  # A Perpl upgrade changes the chain, not this repository; the daily run finds it.
+  schedule:
+    - cron: "0 6 * * *"
 
 permissions:
   contents: read
@@ -51,6 +54,9 @@ jobs:
       # need the Monad-enabled build, and they do not run here.
       - name: Validate
         run: nix-shell --arg monad false --run 'just fmt-check lint test-offline'
+
+      - name: Pinned Perpl ABI matches the deployed implementation
+        run: nix-shell --arg monad false --run 'just abi-drift'
 
       - name: Check nothing was rewritten
         run: git diff --exit-code

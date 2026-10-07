@@ -43,14 +43,11 @@ lint: build-sc
     cd {{ rs }} && cargo clippy --all-targets -- -D warnings
     cd {{ rs }} && cargo machete
 
-# VenuePerplTest asserts that Perpl's live book is deep enough to fill its order,
-# which is the market's state rather than the code's correctness.
-test: build-sc
+test: build-sc abi-drift
     cd {{ sc }} && forge test -vv --network monad --no-match-contract VenuePerplTest
     cd {{ ex }} && cargo test
     cd {{ rs }} && cargo test
 
-# Everything except the fork tests, which need the RPC and a Monad-enabled forge.
 test-offline: build-sc
     cd {{ ex }} && cargo test
     cd {{ rs }} && cargo test
@@ -66,6 +63,16 @@ hooks:
 
 fork:
     anvil --fork-url "$MONAD_RPC_URL"
+
+abi-drift abi="upstream/dex-sdk/crates/sdk/abi/dex/Exchange.json":
+    scripts/abi-drift.sh 0x34B6552d57a35a1D042CcAe1951BD1C370112a6F {{ abi }} \
+        FundingEventCompleted MakerOrderFilledV2 OrderRequestV2 TakerOrderFilledV2 OrderBatchCompleted
+
+data-fetch *args:
+    scripts/data/fetch.sh {{ args }}
+
+data-stats:
+    scripts/data/stats.sh
 
 demo:
     ./scripts/demo.sh
