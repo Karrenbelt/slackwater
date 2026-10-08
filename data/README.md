@@ -33,6 +33,8 @@ A line for a transaction also carries `tx`, `block`, `status`, `gasUsed`, `gasLi
 A line for a read carries only the fields of that read, and every read names its block.
 Prices are in the venue's own units: Perpl in PNS (6 decimals on MON), Kuru `bestBidAsk` in USDC per MON scaled by 1e18.
 Amounts larger than 2^53 are strings.
+A line whose `note` names a retry supersedes the named field of the line before it with the same `step`; the earlier line stays, because the file is append-only.
+A transaction that was mined but reverted has its own line, with `status` 0 and `reverted` true.
 The fee of a transaction is `gasUsed` × `effectiveGasPriceWei`; it is not stored.
 The `step` names:
 - transactions: `bridge-ausd`, `bridge-mon`, `deploy-<function>`, `fund-mon`, `hedge-<k>`, `cancel-<k>`, `cancel-final`;
