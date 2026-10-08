@@ -355,6 +355,36 @@ cmd_deploy() {
     echo "set INSTANCE=$INSTANCE for the next commands"
 }
 
+# Publishes the instance's source to Sourcify. Before asking, it checks that
+# the local build's runtime code has the deployed length and metadata hash
+# (the last 53 bytes: the IPFS hash of the sources and settings, and the solc
+# version), and that the constructor arguments end the creation transaction.
+cmd_verify() {
+    local built deployed args create input chain len
+    need_instance
+    built=$(cd "$SC" && forge inspect BasisTrader deployedBytecode)
+    deployed=$(rd code "$INSTANCE")
+    [[ ${#built} == "${#deployed}" && ${built: -106} == "${deployed: -106}" ]] ||
+        die "the local build differs from the deployed code (length or metadata); check out the deployed commit"
+    echo "ok   runtime length ${#built} and metadata ${built: -106}"
+    args=$(cast abi-encode 'constructor(address,address,address,address)' "$AUSD" "$PERPL" "$KURU_ROUTER" "$OWNER")
+    create=$(jq -r --arg i "${INSTANCE,,}" \
+        'select(.step == "deploy-create" and (.logs[0].address | ascii_downcase) == $i) | .tx' "$ROUNDS_FILE" 2>/dev/null | head -n 1)
+    if [[ -n $create ]]; then
+        input=$(rd tx "$create" input)
+        len=$((${#args} - 2))
+        [[ ${input: -len} == "${args:2}" ]] || die "the constructor arguments do not end creation tx $create"
+        echo "ok   constructor arguments end creation tx $create"
+    else
+        echo "no deploy-create line for $INSTANCE in $ROUNDS_FILE; the constructor arguments are from params.sh only"
+    fi
+    chain=$(rd chain-id)
+    echo "verify: publish the source of src/BasisTrader.sol:BasisTrader at $INSTANCE (chain $chain) to $SOURCIFY_URL"
+    confirm "Publish?"
+    (cd "$SC" && forge verify-contract "$INSTANCE" src/BasisTrader.sol:BasisTrader --chain "$chain" \
+        --verifier sourcify --verifier-url "$SOURCIFY_URL" --constructor-args "$args")
+}
+
 cmd_fund() {
     local inst own h after
     need_instance
@@ -600,6 +630,8 @@ Reads (no signing):
 Signed, each after a simulation and a y/N:
   deploy-sim            forge script DeployHedge without broadcast (no key)
   deploy                broadcast DeployHedge as the owner; records it
+  verify                publish the instance's source to Sourcify, after checking it
+                        matches the deployed code (no key; publishes, so it asks)
   fund                  the owner sends FUND_MON MON to the instance
   post [lots]           the keeper posts a hedge one tick under the Perpl ask
   cancel [label]        the keeper clears the recorded hedge (records order-gone if it left unfilled)
@@ -630,6 +662,7 @@ reconcile) cmd_reconcile ;;
 readback) need_instance && readback ;;
 deploy-sim) cmd_deploy_sim ;;
 deploy) cmd_deploy ;;
+verify) cmd_verify ;;
 fund) cmd_fund ;;
 post) cmd_post "${1:-}" ;;
 cancel) cmd_cancel "${1:-}" ;;

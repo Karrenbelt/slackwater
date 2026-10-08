@@ -6,6 +6,7 @@ RPC="${MONAD_RPC_URL:-https://rpc.monad.xyz}"
 
 PERPL=0x34B6552d57a35a1D042CcAe1951BD1C370112a6F
 AUSD=0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a
+KURU_ROUTER=0xd651346d7c789536ebf06dc72aE3C8502cd695CC
 # Kuru MON/USDC book; MON is its native base.
 BOOK=0x065C9d28E428A0db40191a54d33d5b7c71a9C394
 PERP_ID=10
@@ -19,6 +20,10 @@ KEEPER_ACCOUNT="${KEEPER_ACCOUNT:-slackwater-keeper}"
 
 # Our instance, deployed 2026-10-08. Set INSTANCE empty to deploy another.
 INSTANCE="${INSTANCE-0x4666E86d6f4989cb80726BD7fB5948891F54d080}"
+
+# Sourcify on MonadVision, which needs no API key
+# (https://docs.monad.xyz/guides/verify-smart-contract/foundry).
+SOURCIFY_URL="${SOURCIFY_URL:-https://sourcify-api-monad.blockvision.org/}"
 
 # AUSD (6 dp) that opens the instance's Perpl account; DeployHedge's argument.
 AUSD_SEED_CNS="${AUSD_SEED_CNS:-110000000}"
