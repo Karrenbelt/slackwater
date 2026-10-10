@@ -11,9 +11,11 @@
 # retried and then stops the command; it is never taken as a value.
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 # shellcheck source=scripts/round/params.sh
 source scripts/round/params.sh
+# A round has two clips. `.adopt/round1.fish` exports CLIP as a lot count.
+[[ $CLIP =~ ^[1-9]$ ]] || { echo "CLIP is the clip index (1 or 2), not $CLIP; in fish: set -e CLIP" >&2; exit 1; }
 
 SC=upstream/8ball030/basis_trade/smart_contracts
 
@@ -32,6 +34,12 @@ HEDGE_CANCELLED=0x1d549c5a0c56333f34f6a7f3b9a3f417c5a4a8727b4be1da44f4824ae4cdd0
 # keccak256("PositionOpenedV2(...)") and keccak256("PositionIncreasedV2(...)")
 POSITION_OPENED=0x04cc3d2fc73a9dca30eba1d05eca80b1b1216350243580027046f434fed4db18
 POSITION_INCREASED=0x99a74f70c224396b9ba5fcd5a6e5f480db23e7a25a2b16a8c133ec2efb3e646c
+# keccak256 of PositionClosed(...), PositionDecreased(...), TakerOrderFilledV2(...)
+# from Exchange.json, and of BasisTrader's Exited(uint256,uint256,(...),bool).
+POSITION_CLOSED=0x599b5f439ed4daf1f28ae8638e5439d3982e8001fb26dd8f70021b38672eb26f
+POSITION_DECREASED=0xcd4a9f7ae1cc250eaa0be6bdb30d07efaf0faafb4ff0e76d8fe09a8373e43f85
+TAKER_FILLED=0x9d9bc0117914a61672fc4d289495e1031d64c5f8d4a714db38b52c85856d4999
+EXITED=0x3d209120a1993a49885914fe740ece646eeffe3cbbcd8be0713207c0bbcd55eb
 
 die() {
     echo "$*" >&2
@@ -45,10 +53,13 @@ need_instance() {
 # ------------------------------------------------------------------ chain
 
 # A read through cast, retried on failure. Never used for `cast send`.
+# With --json, a failed cast writes its error object to stdout, so only a
+# successful attempt's output is passed on.
 rd() {
-    local i
+    local i out
     for i in 1 2 3; do
-        if cast "$@" --rpc-url "$RPC"; then
+        if out=$(cast "$@" --rpc-url "$RPC"); then
+            printf '%s\n' "$out"
             return 0
         fi
         echo "read failed (attempt $i of 3): cast $1" >&2
@@ -118,7 +129,8 @@ errname() {
     for pair in 0xb853e584:AmountExceedsAvailableBalance 0x44d9c22e:OracleStale 0x8782b317:OracleUnusable \
         0x267b50e1:HedgeBelowOracle 0xbeb39429:CrossesBook 0x3ec7413b:HedgeResting 0x1464be18:HedgeNotCancelled \
         0x6e053bcd:NoRestingHedge 0xa16ae1a1:Unhedgeable 0xf03a741e:EdgeTooThin 0x7c795110:SpotFillTooSmall \
-        0xb0b199e7:PegOutOfBand 0x604559a5:CloseOrderExceedsPosition; do
+        0xb0b199e7:PegOutOfBand 0x604559a5:CloseOrderExceedsPosition 0xee984e81:PerpLegNotFilled \
+        0x33399398:PerpLegOverfilled 0x943e431c:NothingToExit 0x578f7fed:UnmatchedLotRemainsInFillOrKill; do
         if [[ $1 == *"${pair%%:*}"* ]]; then
             echo "${pair#*:}"
             return
@@ -143,7 +155,7 @@ perp() {
     jq -c --argjson n "$n" --argjson now "$t" --argjson d "$HEDGE_MAX_DISCOUNT_BPS" '.[0] | {
         block: $n, mark: (.[11]|tonumber), oracle: (.[15]|tonumber),
         oracleAgeSec: ($now - (.[16]|tonumber)), bid: (.[24]|tonumber), ask: (.[27]|tonumber),
-        ignOracle: .[29], fundingRatePct100k: (.[20]|tonumber),
+        ignOracle: .[29], fundingRatePct100k: (.[20]|tonumber), fundingSumScalingExp: (.[30]|tonumber),
         floor: ((.[15]|tonumber) * (10000 - $d) / 10000 | ceil)}' <<<"$out"
 }
 
@@ -183,10 +195,12 @@ order() {
         priceONS: (.[2]|tonumber), lotLNS: (.[3]|tonumber), leverageHdths: (.[6]|tonumber)}' <<<"$out"
 }
 
+# The funding sum at block $1, read from the state at block $2 (default $1).
 fundsum() {
-    local n out
+    local n s out
     n=$(blk "${1:-}")
-    out=$(rd call "$PERPL" "$FSUM" "$PERP_ID" "$n" --block "$n" --json)
+    s=${2:-$n}
+    out=$(rd call "$PERPL" "$FSUM" "$PERP_ID" "$n" --block "$s" --json)
     jq -c --argjson n "$n" '{block: $n, fundingSum: (.[0]|tonumber), setAtBlock: (.[1]|tonumber)}' <<<"$out"
 }
 
@@ -405,7 +419,7 @@ cmd_fund() {
 # once the sign rules hold: oracle usable and young enough, a gap of more
 # than one tick, and ask - 1 at or above the bound's floor.
 cmd_post() {
-    local lots=${1:-$CLIP_LOTS} k n p P="" i age bid ask floor a kv base args out rc h id o mine a2
+    local lots=${1:-$CLIP_LOTS} k n p P="" i age bid ask floor a kv q0 base args out rc h id o mine a2
     need_instance
     k=$(next_index hedge-)
     ((k <= MAX_POSTS)) || die "$MAX_POSTS posts already (the first and the requotes); stopping"
@@ -427,7 +441,8 @@ cmd_post() {
     [[ -n $P ]] || die "the sign rules did not hold in $POST_READ_TRIES reads"
     a=$(acct "$n")
     kv=$(kuru "$n")
-    base=$(pos "$n" | jq .lotLNS)
+    q0=$(pos "$n")
+    base=$(jq .lotLNS <<<"$q0")
     args="($PERP_ID,$lots,$P,0,$n)"
     out=$(sim "$INSTANCE" "hedge($HEDGE_T)(uint256)" "$args" --from "$KEEPER") && rc=0 || rc=$?
     ((rc == 0)) || die "simulation: $(errname "$out") $out"
@@ -446,7 +461,8 @@ cmd_post() {
     echo "  expected accountId $mine, orderType 1, priceONS $P, lotLNS $lots"
     echo "acct before: $a"
     echo "acct after:  $a2"
-    note acct-before-post "$(jq -c --argjson k "$k" '. + {post: $k}' <<<"$a")"
+    note acct-before-post "$(jq -c --argjson k "$k" --argjson q "$q0" \
+        '. + {post: $k, depositCNS: $q.depositCNS, lotLNS: $q.lotLNS}' <<<"$a")"
     rec "hedge-$k" "$h" "$(jq -nc --argjson p "$p" --argjson kv "$kv" --argjson lots "$lots" --argjson P "$P" \
         --argjson n "$n" --argjson id "$id" --argjson base "$base" \
         '{perp: $p, kuru: $kv, lots: $lots, pricePNS: $P, requestId: $n, orderId: $id, positionLotsBefore: $base}')"
@@ -550,46 +566,192 @@ cmd_findfill() {
 cmd_afterfill() {
     cmd_cancel cancel-final
     cmd_findfill
-    note acct-after-fill "$(acct)"
-    echo "position: $(pos)"
+    local n a q
+    n=$(rd block-number)
+    a=$(acct "$n")
+    q=$(pos "$n")
+    note acct-after-fill "$(jq -c --argjson q "$q" '. + {depositCNS: $q.depositCNS, lotLNS: $q.lotLNS}' <<<"$a")"
+    echo "position: $q"
+}
+
+# The exit's bounds and guard from a perp read $1, a Kuru read $2, $3 lots,
+# the taker fee $4 (ppm) and the read block $5, which is also the requestId.
+# The Kuru bid (USDC per MON scaled by 1e18) is rounded down for the guard and
+# up for the cash floor, so each check is at least as strict as at the exact
+# bid: lots x bid at that scale overflows bash's 64-bit integers.
+# Assumes perp 10's units: one lot is 1e18 wei of MON, prices in CNS per MON.
+bounds_from() {
+    local p=$1 k=$2 lots=$3 fee=$4 n=$5 bid down up oracle ask age lim min guard=false
+    bid=$(jq -r .bid <<<"$k")
+    down=$((bid / 10 ** 12))
+    up=$(((bid + 10 ** 12 - 1) / 10 ** 12))
+    oracle=$(jq .oracle <<<"$p")
+    ask=$(jq .ask <<<"$p")
+    age=$(jq .oracleAgeSec <<<"$p")
+    lim=$((ask * (10000 + EXIT_LIMIT_BPS) / 10000))
+    min=$(((lots * up * (10000 - EXIT_MIN_CASH_BPS) + 9999) / 10000))
+    if [[ $(jq .ignOracle <<<"$p") == false ]] &&
+        ((age <= MAX_ORACLE_AGE_TO_SIGN_SEC && (oracle - down) * 10000 <= EXIT_GUARD_BPS * oracle)); then
+        guard=true
+    fi
+    jq -nc --argjson n "$n" --argjson p "$p" --argjson k "$k" --argjson down "$down" --argjson up "$up" \
+        --argjson oracle "$oracle" --argjson ask "$ask" --argjson fee "$fee" --argjson guard "$guard" \
+        --argjson lots "$lots" --argjson lim "$lim" --argjson min "$min" \
+        --arg args "($PERP_ID,${lots}000000000000000000,1000000,[$BOOK],[false],[true],$min,$lim,100,$n)" \
+        '{block: $n, perp: $p, kuru: $k, bidDownCNS: $down, bidUpCNS: $up,
+          gapBps: (($oracle - $down) / $oracle * 10000), touchEdgeBps: (($down - $ask) / $ask * 10000 - $fee / 100),
+          guard: $guard, lots: $lots, lim: $lim, min: $min, args: $args}'
+}
+
+exit_bounds() {
+    local n=$1 lots=$2 p k fee
+    p=$(perp "$n")
+    k=$(kuru "$n")
+    fee=$(rd call "$PERPL" 'getTakerFee(uint256)(uint256)' "$PERP_ID" --block "$n" --json | jq -r '.[0]')
+    bounds_from "$p" "$k" "$lots" "$fee" "$n"
 }
 
 # Read only, then recorded: the forced and the keeper's exit of $1 lots
-# (default the clip) at the plan's bounds, and whether the guard holds.
+# (default the clip) at the exit bounds, and whether the guard holds.
 cmd_exitsim() {
-    local lots=${1:-$CLIP_LOTS} n p k ask oracle bid gap lim min x fe ke rfe rke line
+    local lots=${1:-$CLIP_LOTS} n b x fe ke rfe rke line
     need_instance
     n=$(rd block-number)
-    p=$(perp "$n")
-    k=$(kuru "$n")
-    ask=$(jq .ask <<<"$p")
-    oracle=$(jq .oracle <<<"$p")
-    bid=$(jq -r .bid <<<"$k")
-    # Both in USDC with 6 dp: the oracle in PNS, the Kuru bid / 1e12.
-    gap=$(jq -n "($oracle - $bid / 1e12) / $oracle * 10000")
-    lim=$((ask * (10000 + EXIT_LIMIT_BPS) / 10000))
-    min=$(jq -n "$lots * $bid / 1e12 * (10000 - $EXIT_MIN_CASH_BPS) / 10000 | ceil")
-    x="($PERP_ID,${lots}000000000000000000,1000000,[$BOOK],[false],[true],$min,$lim,100,$n)"
+    b=$(exit_bounds "$n" "$lots")
+    x=$(jq -r .args <<<"$b")
     fe=$(sim "$INSTANCE" "forceExit($EXIT_T)($FILL_T)" "$x" --from "$OWNER" --block "$n") && rfe=0 || rfe=$?
     ((rfe != 1)) || die "the forceExit simulation could not be read; nothing recorded"
     ke=$(sim "$INSTANCE" "exit($EXIT_T)($FILL_T)" "$x" --from "$KEEPER" --block "$n") && rke=0 || rke=$?
     ((rke != 1)) || die "the exit simulation could not be read; nothing recorded"
-    line=$(jq -nc --argjson n "$n" --argjson p "$p" --argjson k "$k" --argjson gap "$gap" --argjson g "$EXIT_GUARD_BPS" \
-        --argjson lots "$lots" --argjson lim "$lim" --argjson min "$min" \
-        --arg fe "$fe" --arg ke "$ke" --arg nfe "$(errname "$fe")" --arg nke "$(errname "$ke")" \
+    line=$(jq -c --arg fe "$fe" --arg ke "$ke" --arg nfe "$(errname "$fe")" --arg nke "$(errname "$ke")" \
         --argjson rfe "$rfe" --argjson rke "$rke" \
-        '{block: $n, perp: $p, kuru: $k, gapBps: $gap, guard: ($gap <= $g), lots: $lots, lim: $lim, min: $min,
-          forceExit: (if $rfe == 0 then $fe else "reverted " + $nfe end),
-          exit: (if $rke == 0 then $ke else "reverted " + $nke end), raw: {forceExit: $fe, exit: $ke}}')
+        'del(.args) + {forceExit: (if $rfe == 0 then $fe else "reverted " + $nfe end),
+          exit: (if $rke == 0 then $ke else "reverted " + $nke end), raw: {forceExit: $fe, exit: $ke}}' <<<"$b")
     jq . <<<"$line"
     note exit-sim "$line"
+}
+
+# Our exit's logs, from a receipt (JSON on stdin) and our Perpl account ID $1:
+# the Exited Fill, our PositionClosed and PositionDecreased logs, and every
+# TakerOrderFilledV2. That log carries no account ID; the exit places one
+# Perpl order, and Perpl emits one taker fill per order, so all are ours.
+exit_decode() {
+    local acc out hex
+    acc=$(cast to-uint256 "$1")
+    out=$(jq -c -L scripts/data --arg acc "${acc:2}" --arg perpl "${PERPL,,}" --arg inst "${INSTANCE,,}" \
+        --arg closed "$POSITION_CLOSED" --arg decreased "$POSITION_DECREASED" --arg taker "$TAKER_FILLED" \
+        --arg exited "$EXITED" 'include "lib";
+        [.logs[] | {address: (.address|ascii_downcase), topic0: .topics[0], data}] as $l
+        | ([$l[] | select(.address == $inst and .topic0 == $exited)] | if length == 1 then .[0].data else error("Exited logs: \(length)") end) as $e
+        | {exited: {spotNotionalCNS: ($e|word(1)|hexnum), assetAmountHex: ($e|word(2)), perpNotionalCNS: ($e|word(3)|hexnum),
+                    lotLNS: ($e|word(4)|hexnum), edgePpm: ($e|word(5)|signed), forced: (($e|word(6)|hexnum) == 1)},
+           closes: [$l[] | select(.address == $perpl and (.data|word(1)) == $acc)
+                    | if .topic0 == $closed then {event: "PositionClosed", pricePNS: (.data|word(3)|hexnum),
+                          deltaPnlCNS: (.data|word(4)|signed), fundingCNS: (.data|word(5)|signed)}
+                      elif .topic0 == $decreased then {event: "PositionDecreased", startLotLNS: (.data|word(5)|hexnum),
+                          endLotLNS: (.data|word(6)|hexnum), deltaPnlCNS: (.data|word(7)|signed), fundingCNS: (.data|word(8)|signed)}
+                      else empty end],
+           taker: [$l[] | select(.address == $perpl and .topic0 == $taker)
+                   | {pricePNS: (.data|word(0)|hexnum), lotLNS: (.data|word(3)|hexnum), feeCNS: (.data|word(4)|hexnum),
+                      builderFeeCNS: (.data|word(8)|hexnum), amountCNS: (.data|word(5)|signed),
+                      balanceCNS: (.data|word(6)|hexnum)}]}')
+    hex=$(jq -r .exited.assetAmountHex <<<"$out")
+    jq -c --arg a "$(cast to-dec "0x$hex")" '.exited |= (del(.assetAmountHex) + {assetAmount: $a})' <<<"$out"
+}
+
+# The reads after an exit mined at block $1: the market, the account, the
+# position, what the instance holds, and the funding sums at the clip's first
+# fill and around $1, all from the state at $1.
+exit_after() {
+    local x=$1 fill p k a q wei usdc f0 f1 f2
+    fill=$(jq -s --argjson round "$ROUND" --argjson clip "$CLIP" \
+        '[.[] | select(.round == $round and .clip == $clip and .step == "fill") | .block] | min' "$ROUNDS_FILE")
+    [[ $fill != null ]] || {
+        echo "no fill line for round $ROUND clip $CLIP in $ROUNDS_FILE" >&2
+        return 1
+    }
+    p=$(perp "$x") && k=$(kuru "$x") && a=$(acct "$x") && q=$(pos "$x") &&
+        wei=$(rd balance "$INSTANCE" --block "$x") &&
+        usdc=$(rd call "$USDC" 'balanceOf(address)(uint256)' "$INSTANCE" --block "$x" --json | jq -r '.[0]') &&
+        f0=$(fundsum "$fill" "$x") && f1=$(fundsum $((x - 1)) "$x") && f2=$(fundsum "$x") || return 1
+    jq -nc --argjson x "$x" --argjson p "$p" --argjson k "$k" --argjson a "$a" --argjson q "$q" --arg wei "$wei" \
+        --argjson usdc "$usdc" --argjson f0 "$f0" --argjson f1 "$f1" --argjson f2 "$f2" \
+        '{block: $x, perp: $p, kuru: $k, balanceCNS: $a.balanceCNS, lockedBalanceCNS: $a.lockedBalanceCNS, pos: $q,
+          instanceWei: $wei, instanceUsdcCNS: $usdc, fundingSum: {fill: $f0, beforeExit: $f1, exit: $f2}}'
+}
+
+# The owner closes the whole short and sells as much MON on Kuru, in one
+# forceExit, once the guard holds; it never widens the bounds.
+cmd_forceexit() {
+    local n q lots inst own i b first="" ok=false args out rc a pre h dec x after
+    need_instance
+    [[ $(resting) == 0 ]] || die "a hedge is recorded; the exit would revert HedgeResting: run cancel first"
+    n=$(rd block-number)
+    q=$(pos "$n")
+    lots=$(jq .lotLNS <<<"$q")
+    [[ $(jq .positionType <<<"$q") == 1 ]] && ((lots > 0)) || die "no short to close: $q"
+    inst=$(rd balance "$INSTANCE" --block "$n" --ether)
+    ((${inst%%.*} >= lots)) || die "the instance holds $inst MON, under the short's $lots lots"
+    own=$(rd balance "$OWNER" --ether)
+    jq -en --argjson o "$own" --argjson m "$OWNER_EXIT_GAS_MIN_MON" '$o >= $m' >/dev/null ||
+        die "the owner holds $own MON, under $OWNER_EXIT_GAS_MIN_MON for gas"
+    for ((i = 1; i <= EXIT_READ_TRIES; i++)); do
+        n=$(rd block-number)
+        b=$(exit_bounds "$n" "$lots")
+        [[ -n $first ]] || first=$b
+        if [[ $(jq .guard <<<"$b") == true ]]; then
+            ok=true
+            break
+        fi
+        echo "guard not met (read $i of $EXIT_READ_TRIES): $(jq -c '{block, gapBps, oracleAgeSec: .perp.oracleAgeSec, ignOracle: .perp.ignOracle}' <<<"$b")" >&2
+        ((i == EXIT_READ_TRIES)) || sleep "$EXIT_READ_INTERVAL_SEC"
+    done
+    if [[ $ok == false ]]; then
+        note exit-guard-unmet "$(jq -nc --argjson t "$EXIT_READ_TRIES" --argjson s "$EXIT_READ_INTERVAL_SEC" \
+            --argjson g "$EXIT_GUARD_BPS" --argjson f "$first" --argjson l "$b" \
+            '{block: $l.block, tries: $t, intervalSec: $s, guardBps: $g, first: ($f|del(.args)), last: ($l|del(.args))}')"
+        die "the guard did not hold in $EXIT_READ_TRIES reads, $EXIT_READ_INTERVAL_SEC s apart; recorded exit-guard-unmet. The bounds are not widened"
+    fi
+    args=$(jq -r .args <<<"$b")
+    out=$(sim "$INSTANCE" "forceExit($EXIT_T)($FILL_T)" "$args" --from "$OWNER" --block "$n") && rc=0 || rc=$?
+    ((rc != 1)) || die "the forceExit simulation could not be read; nothing signed"
+    ((rc == 0)) || die "simulation: $(errname "$out") $out
+nothing signed; the position stays hedged. Do not widen the bounds, and do not sweep MON while short"
+    echo "force-exit: owner closes $lots lots and sells $lots MON on Kuru, requestId $n"
+    echo "  args $args"
+    jq -c '{block, gapBps, touchEdgeBps, bidDownCNS, bidUpCNS, lim, min}' <<<"$b"
+    echo "  perp $(jq -c .perp <<<"$b")"
+    echo "  kuru $(jq -c .kuru <<<"$b")"
+    echo "  simulated Fill (perpId, spotNotionalCNS, assetAmount, perpNotionalCNS, lotLNS, edgePpm): $out"
+    confirm "Sign forceExit as $OWNER_ACCOUNT?"
+    a=$(acct "$n")
+    q=$(pos "$n")
+    note acct-before-exit "$(jq -c --argjson q "$q" '. + {depositCNS: $q.depositCNS, pricePNS: $q.pricePNS,
+        lotLNS: $q.lotLNS, premiumPnlCNS: $q.premiumPnlCNS}' <<<"$a")"
+    # `rec` merges these fields last, so the read block must not be `block`.
+    pre=$(jq -c --arg s "$out" 'del(.args, .block) + {readBlock: .block, requestId: .block, simulatedFill: $s}' <<<"$b")
+    h=$(signed force-exit "$pre" "$OWNER_ACCOUNT" "$INSTANCE" "forceExit($EXIT_T)" "$args")
+    dec=$(rd receipt "$h" --json | exit_decode "$(account_id)") || dec='{"decodeError": true}'
+    rec force-exit "$h" "$(jq -c --argjson d "$dec" '. + $d' <<<"$pre")"
+    x=$(rd receipt "$h" blockNumber)
+    after=$(exit_after "$x") || die "transaction $h is recorded; its read-back at block $x is not: write acct-after-exit by hand"
+    note acct-after-exit "$after"
+    jq -c --argjson d "$dec" --argjson min "$(jq .min <<<"$b")" '{block, positionLots: .pos.lotLNS, instanceWei,
+        instanceUsdcCNS, usdcAtLeastMin: (.instanceUsdcCNS >= $min), takerLots: ([$d.taker[]?.lotLNS] | add),
+        exited: $d.exited}' <<<"$after"
+    echo "expected: positionLots 0, the instance's $inst MON less $lots, usdcAtLeastMin true, takerLots $lots, exited.forced true"
 }
 
 # Equity E = balanceCNS + position depositCNS (the order lock is inside
 # balanceCNS), from the first acct-before-post to the last acct-after-fill,
 # against the fees in the recorded fills.
+# The deposits come from the record, because the public RPC serves past state
+# for about 1,000,000 blocks. For acct lines that carry no depositCNS: before
+# the post, a position of 0 lots (positionLotsBefore) has no deposit; after
+# the fill, cancel-final's positionAfter holds it, as afterfill moves nothing
+# between that read and acct-after-fill. Otherwise it is read over RPC.
 cmd_reconcile() {
-    local before after b0 b1 e0 e1 fees split
+    local before after b0 b1 d0 d1 e0 e1 fees split now f0 f1
     before=$(jq -sc --argjson round "$ROUND" --argjson clip "$CLIP" \
         '[.[] | select(.round == $round and .clip == $clip and .step == "acct-before-post")] | first' "$ROUNDS_FILE")
     after=$(jq -sc --argjson round "$ROUND" --argjson clip "$CLIP" \
@@ -597,8 +759,16 @@ cmd_reconcile() {
     [[ $before != null && $after != null ]] || die "need acct-before-post and acct-after-fill lines"
     b0=$(jq .block <<<"$before")
     b1=$(jq .block <<<"$after")
-    e0=$(($(jq .balanceCNS <<<"$before") + $(pos "$b0" | jq .depositCNS)))
-    e1=$(($(jq .balanceCNS <<<"$after") + $(pos "$b1" | jq .depositCNS)))
+    d0=$(jq -s --argjson round "$ROUND" --argjson clip "$CLIP" --argjson b "$before" \
+        '$b.depositCNS // ([.[] | select(.round == $round and .clip == $clip and (.step | startswith("hedge-")))]
+         | first | if .positionLotsBefore == 0 then 0 else null end)' "$ROUNDS_FILE")
+    d1=$(jq -s --argjson round "$ROUND" --argjson clip "$CLIP" --argjson a "$after" \
+        '$a.depositCNS // ([.[] | select(.round == $round and .clip == $clip and .step == "cancel-final"
+         and .block <= $a.block)] | last | .positionAfter.depositCNS)' "$ROUNDS_FILE")
+    [[ $d0 != null ]] || d0=$(pos "$b0" | jq .depositCNS)
+    [[ $d1 != null ]] || d1=$(pos "$b1" | jq .depositCNS)
+    e0=$(($(jq .balanceCNS <<<"$before") + d0))
+    e1=$(($(jq .balanceCNS <<<"$after") + d1))
     fees=$(jq -s --argjson round "$ROUND" --argjson clip "$CLIP" \
         '[.[] | select(.round == $round and .clip == $clip and .step == "fill") | .feeCNS + .builderFeeCNS] | add // 0' "$ROUNDS_FILE")
     split=$(jq -s -L scripts/data --argjson round "$ROUND" --argjson clip "$CLIP" \
@@ -610,7 +780,70 @@ cmd_reconcile() {
     echo "E at $b0: $e0; E at $b1: $e1; change $((e1 - e0))"
     echo "fees (feeCNS + builderFeeCNS): $fees; gap $((e1 - e0 + fees))"
     echo "insFeeCNS + protFeeCNS in the position logs: $split (the split of feeCNS, not added to it)"
-    echo "funding sum: $(fundsum "$b0") -> $(fundsum "$b1")"
+    echo "deposits: $d0 at $b0, $d1 at $b1"
+    if now=$(rd block-number) && f0=$(fundsum "$b0" "$now") && f1=$(fundsum "$b1" "$now"); then
+        echo "funding sum (read from the state at $now): $f0 -> $f1"
+    else
+        echo "funding sum: could not be read"
+    fi
+    reconcile_exit "$e0" "$e1" "$fees"
+}
+
+# After an exit, from record lines only: the hold (E at acct-after-fill $2
+# against acct-before-exit), the close (the equity change against the close
+# and taker-fill logs), funding (the close's fundingCNS against the funding
+# sums), and the realised result H of the clip from its fill to the exit.
+# H = Kuru proceeds + (E after the exit - E before the post, $1) - gas, in
+# CNS with USDC and AUSD at par (peg 1,000,000). Gas is converted at the Kuru
+# bid read before the exit. Per-instance transactions (bridge, deploy, fund)
+# are excluded and printed apart. $3 is the maker fees of the clip's fills.
+reconcile_exit() {
+    jq -sr --argjson round "$ROUND" --argjson clip "$CLIP" --argjson e0 "$1" --argjson e1 "$2" --argjson maker "$3" '
+        def gas: [.[] | select(.tx != null and .gasUsed != null) | .gasUsed * .effectiveGasPriceWei] | add // 0;
+        def bps($v; $base): ($v / $base * 10000 * 100 | round) / 100;
+        ([.[] | select(.round == $round and .clip == null)] | gas) as $instGas
+        | [.[] | select(.round == $round and .clip == $clip)] as $c
+        | ([$c[] | select(.step == "acct-before-exit")] | last) as $b
+        | ([$c[] | select(.step == "force-exit" and .status == 1)] | last) as $x
+        | ([$c[] | select(.step == "acct-after-exit")] | last) as $a
+        | if $b == null or $x == null or $a == null then "exit: no acct-before-exit, force-exit and acct-after-exit lines; nothing more"
+          elif $x.decodeError then "exit: the force-exit line has no decoded logs; decode its receipt first"
+          else
+            ($x.exited.lotLNS) as $L
+            | ($b.balanceCNS + $b.depositCNS) as $eb
+            | ($a.balanceCNS + $a.pos.depositCNS) as $ea
+            | ([$x.closes[].deltaPnlCNS] | add // 0) as $pnl
+            | ([$x.closes[].fundingCNS] | add // 0) as $fund
+            | ([$x.taker[] | .feeCNS + .builderFeeCNS] | add // 0) as $taker
+            | pow(10; $a.perp.fundingSumScalingExp) as $scale
+            | $a.fundingSum as $fs
+            | ($L * ($fs.exit.fundingSum - $fs.fill.fundingSum) / $scale) as $fx
+            | ($L * ($fs.beforeExit.fundingSum - $fs.fill.fundingSum) / $scale) as $fx1
+            | ($x.kuru.bid | tonumber) as $bidX
+            | ([$c[] | select(.step | startswith("hedge-") or startswith("cancel-") or . == "force-exit")] | gas) as $gasWei
+            | ($gasWei / 1e18 * $bidX / 1e12) as $gas
+            | $x.exited.spotNotionalCNS as $spot
+            | ($spot + ($ea - $e0) - $gas) as $h
+            | ([$c[] | select(.step | startswith("hedge-"))] | first | .kuru) as $postKuru
+            | ($L * ($postKuru.bid | tonumber) / 1e12) as $A
+            | ($L * $a.perp.mark) as $B
+            | ($L * $b.pricePNS - $A) as $post
+            | ($spot - $L * $b.pricePNS + $pnl) as $basis
+            | ($maker + $taker) as $fees
+            | ($post + $basis + $fund - $fees - $gas) as $sum
+            | "exit at block \($a.block), \($L) lots",
+              "hold: E at acct-after-fill \($e1), at acct-before-exit \($eb); gap \($eb - $e1)",
+              "close: E \($eb) -> \($ea), change \($ea - $eb); deltaPnl \($pnl) + funding \($fund) - taker fees \($taker) = \($pnl + $fund - $taker); gap \($ea - $eb - ($pnl + $fund - $taker))",
+              "taker lots \([$x.taker[].lotLNS] | add // 0); close events \([$x.closes[].event] | join(", "))",
+              "funding: fundingCNS \($fund); \($L) x (sum at exit \($fs.exit.fundingSum) - at fill \($fs.fill.fundingSum)) / 10^\($a.perp.fundingSumScalingExp) = \($fx); gap \($fund - $fx)"
+                + (if $fs.exit.setAtBlock == $a.block then "; a funding event is in the exit block: against the sum before it, \($fx1), gap \($fund - $fx1)" else "" end),
+              "result over blocks \([$c[] | select(.step == "fill") | .block] | min) to \($a.block), size \($L) MON, CNS, USDC and AUSD at par:",
+              "  H = Kuru proceeds \($spot) + equity change since acct-before-post \($ea - $e0) - gas \($gas | round) (\($gasWei) wei at bid \($bidX / 1e12)) = \($h | round)",
+              "  A, sold on Kuru at the post (bid \($postKuru.bid) at block \($postKuru.block)): \($A | round); H - A = \($h - $A | round) CNS, \(bps($h - $A; $A)) bps of A",
+              "  B, held unhedged at the Perpl mark \($a.perp.mark) at the exit: \($B); H - B = \($h - $B | round) CNS, \(bps($h - $B; $A)) bps of A",
+              "  H - A = post \($post | round) (\(bps($post; $A)) bps) + exit basis \($basis | round) (\(bps($basis; $A)) bps) + funding \($fund) (\(bps($fund; $A)) bps) - fees \($fees) (\(bps($fees; $A)) bps) - gas (\(bps($gas; $A)) bps); residual \($h - $A - $sum | round + 0)",
+              "  excluded, per instance: bridge, deploy and fund transactions, \($instGas) wei of gas"
+          end' "$ROUNDS_FILE"
 }
 
 usage() {
@@ -624,7 +857,8 @@ Reads (no signing):
   watch <orderId>       every 30 s, the order and the position; Ctrl-C to stop
   findfill              find and record our maker fills since the last post
   exitsim [lots]        simulate forceExit and exit at the exit bounds; records exit-sim
-  reconcile             account equity against the recorded fill fees
+  reconcile             account equity against the recorded fees and, after an exit,
+                        the close, the funding and the realised result
   readback              the instance's settings against DeployHedge's
 
 Signed, each after a simulation and a y/N:
@@ -637,6 +871,8 @@ Signed, each after a simulation and a y/N:
   cancel [label]        the keeper clears the recorded hedge (records order-gone if it left unfilled)
   requote               cancel, then post the unfilled rest of the clip
   afterfill             cancel-final, findfill, and the account read
+  forceexit             the owner closes the whole short and sells as much MON, once
+                        the guard holds; records the exit and the reads after it
 
 Recording by hand:
   rec <step> <tx> [json]
@@ -668,6 +904,7 @@ post) cmd_post "${1:-}" ;;
 cancel) cmd_cancel "${1:-}" ;;
 requote) cmd_requote ;;
 afterfill) cmd_afterfill ;;
+forceexit) cmd_forceexit ;;
 rec) rec "$@" ;;
 note) note "$@" ;;
 help | -h | --help) usage ;;

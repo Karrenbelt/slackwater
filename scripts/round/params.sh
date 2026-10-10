@@ -9,6 +9,8 @@ AUSD=0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a
 KURU_ROUTER=0xd651346d7c789536ebf06dc72aE3C8502cd695CC
 # Kuru MON/USDC book; MON is its native base.
 BOOK=0x065C9d28E428A0db40191a54d33d5b7c71a9C394
+# USDC (6 dp), the market's cashToken: an exit's proceeds stay in the instance.
+USDC=0x754704Bc059F8C67012fEd69BC8A327a5aafb603
 PERP_ID=10
 
 # The owner signs deploy, funding and forced exits; the keeper signs hedge
@@ -52,7 +54,14 @@ MAX_POSTS=4
 
 # Exit bounds: the buy-back at most the Perpl ask + 50 bps, the Kuru sale at
 # least the Kuru bid - 50 bps; sign only while the Kuru bid is within 30 bps
-# under the oracle (decision 32).
-EXIT_LIMIT_BPS=50
-EXIT_MIN_CASH_BPS=50
-EXIT_GUARD_BPS=30
+# under the oracle (decision 32), and the oracle is usable and at most
+# MAX_ORACLE_AGE_TO_SIGN_SEC old.
+EXIT_LIMIT_BPS="${EXIT_LIMIT_BPS:-50}"
+EXIT_MIN_CASH_BPS="${EXIT_MIN_CASH_BPS:-50}"
+EXIT_GUARD_BPS="${EXIT_GUARD_BPS:-30}"
+# The guard is read at most this many times, this far apart, then the exit
+# stops: 20 x 15 s is 5 minutes.
+EXIT_READ_TRIES="${EXIT_READ_TRIES:-20}"
+EXIT_READ_INTERVAL_SEC="${EXIT_READ_INTERVAL_SEC:-15}"
+# MON the owner must hold to sign the exit (about 0.075 MON of gas).
+OWNER_EXIT_GAS_MIN_MON="${OWNER_EXIT_GAS_MIN_MON:-1}"
