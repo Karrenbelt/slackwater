@@ -34,11 +34,20 @@ A line for a read carries only the fields of that read, and every read names its
 Prices are in the venue's own units: Perpl in PNS (6 decimals on MON), Kuru `bestBidAsk` in USDC per MON scaled by 1e18.
 Amounts larger than 2^53 are strings.
 A line whose `note` names a retry supersedes the named field of the line before it with the same `step`; the earlier line stays, because the file is append-only.
+A line whose `note` names a correction is a copy of the line before it with the same `step`, with the named fields corrected.
 A transaction that was mined but reverted has its own line, with `status` 0 and `reverted` true.
 The fee of a transaction is `gasUsed` × `effectiveGasPriceWei`; it is not stored.
 The `step` names:
-- transactions: `bridge-ausd`, `bridge-mon`, `deploy-<function>`, `fund-mon`, `hedge-<k>`, `cancel-<k>`, `cancel-final`;
-- reads: `deploy-readback`, `acct-before-post`, `acct-after-post`, `acct-after-fill`, `fill`, `order-gone`, `exit-sim`.
+- transactions: `bridge-ausd`, `bridge-mon`, `deploy-<function>`, `fund-mon`, `hedge-<k>`, `cancel-<k>`, `cancel-final`, `force-exit`;
+- reads: `deploy-readback`, `acct-before-post`, `acct-after-post`, `acct-after-fill`, `fill`, `order-gone`, `exit-sim`, `exit-guard-unmet`, `acct-before-exit`, `acct-after-exit`;
+- stated by the user: `bridge-dai`, the DAI sent on Base for the bridge line its `bridgeStep` and `tx` name.
+
+A `force-exit` line carries the reads it was signed on (`perp`, `kuru`, `gapBps`, `touchEdgeBps`, `lots`, `lim`, `min`, `requestId`, `simulatedFill`) and its decoded logs:
+- `exited`: the contract's `Exited` Fill (`spotNotionalCNS` is the USDC from Kuru at peg 1,000,000; `perpNotionalCNS` is the short's entry value, not the buy-back);
+- `closes`: our `PositionClosed` and `PositionDecreased` logs, with `deltaPnlCNS` and `fundingCNS`;
+- `taker`: every `TakerOrderFilledV2` in the transaction, which places one Perpl order.
+A line with `decodeError` true kept its `logs` but could not be decoded.
+`acct-after-exit` is read from the state at the exit block, including `fundingSum` at the clip's first fill, at the block before the exit and at the exit.
 
 A Kuru touch is state, not an event, so the Kuru reads in these lines cannot be fetched again once the RPC no longer serves their blocks.
 
