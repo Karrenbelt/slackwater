@@ -1,0 +1,44 @@
+# The keeper's parameters. The hedge bound's discount is not here: it is read
+# from the instance (`hedgeMaxDiscountBps`) at start.
+
+rpc_url = "https://rpc.monad.xyz"
+
+[instance]
+address = "0x4666E86d6f4989cb80726BD7fB5948891F54d080"
+keeper = "0xc485487e11aafca2677071c3cd0c83f70872a3d2"
+perp_id = 10
+# Kuru MON/USDC book, for the touch exit edge.
+kuru_book = "0x065C9d28E428A0db40191a54d33d5b7c71a9C394"
+
+[record]
+path = "data/raw/rounds.jsonl"
+round = 1
+clip = 2
+
+[clip]
+# One lot is one MON on perp 10.
+lots = 1850
+# The first post and 3 requotes; reverted posts are not counted here.
+max_posts = 4
+requote_min = 15
+# At most the instance's hedgeMaxOracleAgeSec (60), leaving time for inclusion.
+oracle_age_to_sign_sec = 40
+
+# Stop rules, tier 1 (sources in the unit's plan): ratios of the mark to the
+# short's entry price in bps of the entry price, funding in bps of the entry
+# notional.
+[stop]
+top_up_mark_bps = 12500
+mark_rise_signal_bps = 15000
+funding_signal_bps = 15
+# The forceexit guard, and the guard the owner may use under mark-rise.
+exit_guard_bps = 30
+widened_exit_guard_bps = 100
+signal_repeat_min = 30
+gas_signal_mon = 5
+gas_stop_mon = 1
+
+[run]
+poll_sec = 15
+receipt_timeout_sec = 60
+max_failed_cycles = 8
