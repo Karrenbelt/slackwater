@@ -12,7 +12,7 @@ use perpl_sdk::abi::dex::Exchange::{
 };
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 
-use crate::bindings::KuruOrderBook::bestBidAskCall;
+use slackwater::bindings::KuruOrderBook::bestBidAskCall;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RowError {

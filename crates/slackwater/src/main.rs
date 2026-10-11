@@ -1,4 +1,3 @@
-mod bindings;
 mod books;
 mod config;
 mod depth;
