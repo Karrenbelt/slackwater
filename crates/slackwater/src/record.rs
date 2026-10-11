@@ -345,7 +345,8 @@ mod tests {
 
     use super::*;
 
-    const ROUND_1: &str = include_str!("../../../data/raw/rounds.jsonl");
+    // The record as it stood before clip 2, not the live file, which grows.
+    const ROUND_1: &str = include_str!("../fixtures/rounds-round-1-clip-1.jsonl");
 
     #[test]
     fn round_1_clip_1_reads_one_cancelled_post() {
